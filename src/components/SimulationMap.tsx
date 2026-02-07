@@ -1,42 +1,47 @@
-import { useEffect, useRef, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import type { Agent, Vehicle } from '@/types/simulation';
-import { ASTON_BOUNDARY, ASTON_CENTER, ASTON_ZOOM, BUS_STOPS, BUS_ROUTES } from '@/data/astonData';
-import type { BusRoute } from '@/types/simulation';
 
-// Age to color interpolation (yellow-green to emerald)
+import type { Agent, Vehicle, BusRoute } from '@/types/simulation';
+import { ASTON_BOUNDARY, ASTON_CENTER, ASTON_ZOOM, BUS_STOPS } from '@/data/astonData';
+import { getFlowEdges } from '@/simulation/engine';
+
+// Age to color interpolation
 function ageToColor(age: number): string {
   const t = Math.min(age / 90, 1);
-  const h = 80 + t * 72; // 80 (yellow-green) to 152 (emerald)
+  const h = 80 + t * 72;
   const s = 70;
-  const l = 55 - t * 10; // slightly darker for older
+  const l = 55 - t * 10;
   return `hsl(${h}, ${s}%, ${l}%)`;
 }
 
-// Agent state to opacity
 function stateToOpacity(state: Agent['state']): number {
   switch (state) {
-    case 'at_home': return 0.4;
+    case 'at_home': return 0.35;
     case 'walking_to_stop': return 0.8;
     case 'waiting': return 0.9;
     case 'riding': return 1;
     case 'walking_to_dest': return 0.8;
-    case 'at_destination': return 0.3;
-    default: return 0.5;
+    case 'at_destination': return 0.25;
+    default: return 0.75;
   }
 }
 
-// Agent state to radius
 function stateToRadius(state: Agent['state']): number {
   switch (state) {
     case 'riding': return 5;
     case 'waiting': return 4.5;
     case 'walking_to_stop':
     case 'walking_to_dest': return 4;
-    default: return 3;
+    default: return 3.5;
   }
 }
+
+type SimpleStop = {
+  id: string;
+  name: string;
+  location: [number, number];
+};
 
 interface SimulationMapProps {
   agents: Agent[];
@@ -45,6 +50,9 @@ interface SimulationMapProps {
   generatedRoutes: BusRoute[];
   selectedAgentId: string | null;
   onSelectAgent: (id: string | null) => void;
+
+  baseRoutes?: BusRoute[];
+  stops?: SimpleStop[];
 }
 
 export default function SimulationMap({
@@ -54,16 +62,40 @@ export default function SimulationMap({
   generatedRoutes,
   selectedAgentId,
   onSelectAgent,
+  baseRoutes,
+  stops,
 }: SimulationMapProps) {
   const mapRef = useRef<L.Map | null>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
+
   const agentLayerRef = useRef<L.LayerGroup | null>(null);
   const vehicleLayerRef = useRef<L.LayerGroup | null>(null);
   const routeLayerRef = useRef<L.LayerGroup | null>(null);
-  const boundaryLayerRef = useRef<L.Polygon | null>(null);
   const stopsLayerRef = useRef<L.LayerGroup | null>(null);
+  const flowLayerRef = useRef<L.LayerGroup | null>(null);
 
-  // Initialize map
+  const agentMarkersRef = useRef<Map<string, L.CircleMarker>>(new Map());
+
+  // IMPORTANT: in Skyline mode, if baseRoutes is provided, never fall back.
+  const effectiveRoutes = baseRoutes !== undefined ? baseRoutes : [];
+
+  const fallbackStops: SimpleStop[] = (BUS_STOPS as any[])
+    .map((s) => ({
+      id: String(s.id),
+      name: String(s.name ?? s.id),
+      location: (s.location ?? s.position) as [number, number],
+    }))
+    .filter(s => Array.isArray(s.location) && s.location.length === 2);
+
+  const effectiveStops = stops && stops.length > 0 ? stops : fallbackStops;
+
+  // Build stop lookup (for flow layer)
+  const stopById = useMemo(() => {
+    const m = new Map<string, [number, number]>();
+    for (const s of effectiveStops) m.set(String(s.id), s.location);
+    return m;
+  }, [effectiveStops]);
+
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
 
@@ -74,16 +106,16 @@ export default function SimulationMap({
       attributionControl: true,
     });
 
-    // Dark CartoDB tiles
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
       subdomains: 'abcd',
       maxZoom: 19,
     }).addTo(map);
 
-    // Add Aston boundary
-    const boundary = L.polygon(
-      ASTON_BOUNDARY.map(([lat, lng]) => [lat, lng] as L.LatLngTuple),
+    // Aston boundary
+    L.polygon(
+      (ASTON_BOUNDARY as any).map(([lat, lng]: any) => [lat, lng] as L.LatLngTuple),
       {
         color: 'hsl(152, 70%, 45%)',
         weight: 1.5,
@@ -93,30 +125,12 @@ export default function SimulationMap({
         dashArray: '5, 5',
       }
     ).addTo(map);
-    boundaryLayerRef.current = boundary;
 
-    // Create layers
     agentLayerRef.current = L.layerGroup().addTo(map);
     vehicleLayerRef.current = L.layerGroup().addTo(map);
     routeLayerRef.current = L.layerGroup().addTo(map);
     stopsLayerRef.current = L.layerGroup().addTo(map);
-
-    // Add bus stops
-    for (const stop of BUS_STOPS) {
-      L.circleMarker(stop.location, {
-        radius: 5,
-        color: 'hsl(210, 15%, 50%)',
-        weight: 1,
-        fillColor: 'hsl(210, 15%, 30%)',
-        fillOpacity: 0.8,
-      })
-        .bindTooltip(stop.name, {
-          className: 'stop-tooltip',
-          direction: 'top',
-          offset: [0, -8],
-        })
-        .addTo(stopsLayerRef.current!);
-    }
+    flowLayerRef.current = L.layerGroup().addTo(map);
 
     mapRef.current = map;
 
@@ -126,36 +140,102 @@ export default function SimulationMap({
     };
   }, []);
 
-  // Update routes
+  // Stops layer
+  useEffect(() => {
+    if (!stopsLayerRef.current) return;
+    stopsLayerRef.current.clearLayers();
+
+    for (const stop of effectiveStops) {
+      if (!stop.location || stop.location.length !== 2) continue;
+
+      L.circleMarker(stop.location, {
+        radius: 4,
+        color: 'hsl(210, 15%, 55%)',
+        weight: 1,
+        fillColor: 'hsl(210, 15%, 30%)',
+        fillOpacity: 0.7,
+      })
+        .bindTooltip(stop.name, { direction: 'top', offset: [0, -8] })
+        .addTo(stopsLayerRef.current);
+    }
+  }, [effectiveStops]);
+
+  // ✅ Flow layer (new, Skyline-like)
+  useEffect(() => {
+    if (!flowLayerRef.current) return;
+    flowLayerRef.current.clearLayers();
+    if (!showRoutes) return;
+
+    const flowEdges = getFlowEdges();
+    if (!flowEdges.length) return;
+
+    // Pick top edges for visual clarity
+    const sorted = flowEdges.slice().sort((a, b) => b.count - a.count).slice(0, 250);
+    const maxCount = sorted[0]?.count ?? 1;
+
+    for (const e of sorted) {
+      const a = stopById.get(String(e.from));
+      const b = stopById.get(String(e.to));
+      if (!a || !b) continue;
+
+      // Thickness scales with flow
+      const t = e.count / maxCount;
+      const weight = 1 + t * 6;
+
+      L.polyline([a, b] as any, {
+        color: 'hsl(152, 70%, 55%)',
+        weight,
+        opacity: 0.12 + t * 0.25,
+      }).addTo(flowLayerRef.current);
+    }
+  }, [showRoutes, stopById, agents]); // agents changes each tick so overlay updates over time
+
+  // Routes layer (generated corridors)
   useEffect(() => {
     if (!routeLayerRef.current) return;
     routeLayerRef.current.clearLayers();
-
     if (!showRoutes) return;
 
-    const allRoutes = [...BUS_ROUTES, ...generatedRoutes];
+    const allRoutes = [...effectiveRoutes, ...generatedRoutes];
+    if (allRoutes.length === 0) return;
+
+    // Scale generated route thickness based on how many stop-to-stop edges exist in flow
+    const flow = getFlowEdges();
+    const flowCountByEdge = new Map<string, number>();
+    for (const f of flow) flowCountByEdge.set(`${f.from}→${f.to}`, f.count);
+
     for (const route of allRoutes) {
-      L.polyline(route.geometry, {
+      if (!route.geometry || route.geometry.length === 0) continue;
+
+      const isGenerated = generatedRoutes.some(gr => gr.id === route.id);
+
+      let demandScore = 0;
+      if (isGenerated && route.stopIds && route.stopIds.length > 1) {
+        for (let i = 0; i < route.stopIds.length - 1; i++) {
+          demandScore += flowCountByEdge.get(`${route.stopIds[i]}→${route.stopIds[i + 1]}`) ?? 0;
+        }
+      }
+
+      const weight = isGenerated ? Math.min(9, 3 + Math.log10(1 + demandScore) * 3) : 3;
+
+      L.polyline(route.geometry as any, {
         color: route.color,
-        weight: 3,
-        opacity: 0.6,
-        dashArray: generatedRoutes.includes(route) ? '8, 4' : undefined,
+        weight,
+        opacity: isGenerated ? 0.85 : 0.55,
+        dashArray: isGenerated ? '8, 4' : undefined,
       })
         .bindTooltip(route.name, { sticky: true })
-        .addTo(routeLayerRef.current!);
+        .addTo(routeLayerRef.current);
     }
-  }, [showRoutes, generatedRoutes]);
+  }, [showRoutes, generatedRoutes, effectiveRoutes, agents]);
 
-  // Update agents (using canvas-like approach with circle markers)
-  const agentMarkersRef = useRef<Map<string, L.CircleMarker>>(new Map());
-
+  // Agents layer
   useEffect(() => {
     if (!agentLayerRef.current) return;
 
     const existingMarkers = agentMarkersRef.current;
     const currentAgentIds = new Set(agents.map(a => a.id));
 
-    // Remove markers for agents that no longer exist
     for (const [id, marker] of existingMarkers) {
       if (!currentAgentIds.has(id)) {
         agentLayerRef.current.removeLayer(marker);
@@ -163,7 +243,6 @@ export default function SimulationMap({
       }
     }
 
-    // Update or create markers
     for (const agent of agents) {
       const color = ageToColor(agent.age);
       const opacity = stateToOpacity(agent.state);
@@ -172,59 +251,29 @@ export default function SimulationMap({
 
       let marker = existingMarkers.get(agent.id);
       if (marker) {
-        marker.setLatLng(agent.currentLocation);
+        marker.setLatLng(agent.currentLocation as any);
         marker.setStyle({
           fillColor: isSelected ? '#ffffff' : color,
           fillOpacity: isSelected ? 1 : opacity,
           radius: isSelected ? 8 : radius,
           weight: isSelected ? 2 : 0,
           color: isSelected ? '#ffffff' : color,
-        });
+        } as any);
       } else {
-        marker = L.circleMarker(agent.currentLocation, {
+        marker = L.circleMarker(agent.currentLocation as any, {
           radius: isSelected ? 8 : radius,
           fillColor: isSelected ? '#ffffff' : color,
           fillOpacity: isSelected ? 1 : opacity,
           weight: isSelected ? 2 : 0,
           color: isSelected ? '#ffffff' : color,
-        });
+        } as any);
+
         marker.on('click', () => onSelectAgent(agent.id));
-        marker.addTo(agentLayerRef.current!);
+        marker.addTo(agentLayerRef.current);
         existingMarkers.set(agent.id, marker);
       }
     }
   }, [agents, selectedAgentId, onSelectAgent]);
 
-  // Update vehicles
-  useEffect(() => {
-    if (!vehicleLayerRef.current) return;
-    vehicleLayerRef.current.clearLayers();
-
-    for (const vehicle of vehicles) {
-      const route = [...BUS_ROUTES, ...generatedRoutes].find(r => r.id === vehicle.routeId);
-      if (!route) continue;
-
-      L.circleMarker(vehicle.position, {
-        radius: 7,
-        fillColor: route.color,
-        fillOpacity: 0.9,
-        weight: 2,
-        color: '#ffffff',
-        opacity: 0.5,
-      })
-        .bindTooltip(
-          `${route.name}<br/>${vehicle.passengers.length}/${vehicle.capacity} passengers`,
-          { direction: 'top' }
-        )
-        .addTo(vehicleLayerRef.current!);
-    }
-  }, [vehicles, generatedRoutes]);
-
-  return (
-    <div
-      ref={mapContainerRef}
-      className="w-full h-full"
-      style={{ minHeight: '100vh' }}
-    />
-  );
+  return <div ref={mapContainerRef} className="w-full h-full" />;
 }

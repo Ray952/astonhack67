@@ -1,7 +1,7 @@
-import { useMemo, useCallback } from 'react';
-import { Play, Pause, RotateCcw, Eye, EyeOff, Zap, Route, Leaf, Users, Clock, MapPin } from 'lucide-react';
-import type { SimulationState, BusRoute } from '@/types/simulation';
-import { BUS_ROUTES, BUS_STOPS, POIS, ASTON_CENSUS } from '@/data/astonData';
+import { useMemo } from 'react';
+import { Play, Pause, RotateCcw, Eye, EyeOff, Zap, Route, Leaf, Users, Clock, MapPin, TrendingUp } from 'lucide-react';
+import type { SimulationState } from '@/types/simulation';
+import { BUS_ROUTES, ASTON_CENSUS } from '@/data/astonData';
 
 interface ControlPanelProps {
   state: SimulationState;
@@ -51,6 +51,10 @@ export default function ControlPanel({
   }, [selectedAgentId, agents]);
 
   const dayProgress = (currentMinute / 1440) * 100;
+
+  const analysis = (state as any).analysis as any | undefined;
+  const baseline = analysis?.baseline ?? null;
+  const proposal = analysis?.proposal ?? null;
 
   return (
     <div className="w-[380px] h-screen overflow-y-auto bg-sim-panel border-l border-sim-panel-border flex flex-col">
@@ -163,7 +167,6 @@ export default function ControlPanel({
         <StatRow label="Arrived" value={metrics.arrivedAgents} />
         <StatRow label="Average Age" value={metrics.averageAge} unit="yrs" />
 
-        {/* Age color scale */}
         <div className="mt-3">
           <span className="text-xs text-muted-foreground">Age Color Scale</span>
           <div className="age-gradient mt-1" />
@@ -204,23 +207,16 @@ export default function ControlPanel({
           </button>
         </div>
 
-        {/* Active routes */}
         <div className="space-y-1.5">
           {BUS_ROUTES.map(route => (
             <div key={route.id} className="flex items-center gap-2 text-xs">
-              <div
-                className="w-2.5 h-2.5 rounded-full"
-                style={{ backgroundColor: route.color }}
-              />
+              <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: route.color }} />
               <span className="text-muted-foreground">{route.name}</span>
             </div>
           ))}
           {generatedRoutes.map(route => (
             <div key={route.id} className="flex items-center gap-2 text-xs">
-              <div
-                className="w-2.5 h-2.5 rounded-full"
-                style={{ backgroundColor: route.color }}
-              />
+              <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: route.color }} />
               <span className="text-foreground">{route.name}</span>
               <span className="text-[10px] px-1 py-0.5 rounded bg-primary/20 text-primary">NEW</span>
             </div>
@@ -234,6 +230,45 @@ export default function ControlPanel({
             </button>
           )}
         </div>
+      </div>
+
+      {/* ✅ Step 9: Before vs After */}
+      <div className="px-5 py-3 border-t border-sim-panel-border">
+        <h2 className="text-sm font-semibold text-foreground flex items-center gap-2 mb-3">
+          <TrendingUp className="w-4 h-4 text-primary" />
+          Before vs After
+        </h2>
+
+        {!baseline ? (
+          <div className="text-xs text-muted-foreground">
+            Run the simulation to 12:00 to capture the baseline.
+          </div>
+        ) : (
+          <>
+            <div className="text-xs text-muted-foreground mb-2">Baseline (Before)</div>
+            <StatRow label="Demand edges" value={baseline.edges} />
+            <StatRow label="Total traversals" value={baseline.totalTraversals} />
+            <StatRow label="Peak demand hour" value={`${baseline.peakHour}:00`} />
+            <StatRow label="CO₂ emitted" value={baseline.totalCO2} unit="kg" />
+          </>
+        )}
+
+        <div className="mt-4" />
+
+        {!proposal ? (
+          <div className="text-xs text-muted-foreground">
+            Click <span className="text-foreground">Generate</span> to compute corridor coverage.
+          </div>
+        ) : (
+          <>
+            <div className="text-xs text-muted-foreground mb-2">Proposed Corridors (After)</div>
+            <StatRow label="Routes generated" value={proposal.routesCount} />
+            <StatRow label="Total route length" value={proposal.routeKm} unit="km" />
+            <StatRow label="Demand captured" value={`${proposal.demandCapturedPct}%`} />
+            <StatRow label="Captured traversals" value={proposal.demandCapturedTraversals} />
+            <StatRow label="Efficiency" value={proposal.efficiency} unit="trav/km" />
+          </>
+        )}
       </div>
 
       {/* Carbon Emissions Analysis */}
@@ -262,16 +297,6 @@ export default function ControlPanel({
           <StatRow label="Waiting" value={selectedAgent.waitingTime} unit="min" />
           <StatRow label="Riding" value={selectedAgent.ridingTime} unit="min" />
           <StatRow label="CO₂" value={Math.round(selectedAgent.carbonEmitted * 1000) / 1000} unit="kg" />
-          {selectedAgent.schedule.length > 0 && (
-            <div className="mt-2">
-              <span className="text-xs text-muted-foreground">Schedule:</span>
-              {selectedAgent.schedule.map((entry, i) => (
-                <div key={i} className="text-xs text-muted-foreground ml-2">
-                  {formatTime(entry.departureMinute)} → {entry.label}
-                </div>
-              ))}
-            </div>
-          )}
         </div>
       )}
 

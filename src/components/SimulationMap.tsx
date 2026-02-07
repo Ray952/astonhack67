@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
-import type { Agent, Vehicle, BusRoute } from '@/types/simulation';
+import type { Agent, Vehicle, BusRoute, POI } from '@/types/simulation';
 import { ASTON_BOUNDARY, ASTON_CENTER, ASTON_ZOOM, BUS_STOPS } from '@/data/astonData';
 import { getFlowEdges } from '@/simulation/engine';
 
@@ -52,8 +52,25 @@ interface SimulationMapProps {
   showFlow: boolean;
   showCorridors: boolean;
 
+  showPOIs: boolean;
+  pois: POI[];
+
   baseRoutes?: BusRoute[];
   stops?: SimpleStop[];
+}
+
+function poiColor(type: POI['type']) {
+  switch (type) {
+    case 'education': return 'hsl(210, 80%, 60%)';
+    case 'employment': return 'hsl(35, 90%, 55%)';
+    case 'retail': return 'hsl(300, 70%, 60%)';
+    case 'healthcare': return 'hsl(0, 80%, 60%)';
+    case 'social': return 'hsl(160, 70%, 50%)';
+    case 'leisure': return 'hsl(190, 80%, 55%)';
+    case 'religious': return 'hsl(270, 60%, 60%)';
+    case 'transport': return 'hsl(50, 90%, 55%)';
+    default: return 'hsl(0,0%,70%)';
+  }
 }
 
 export default function SimulationMap({
@@ -66,6 +83,8 @@ export default function SimulationMap({
   stops,
   showFlow,
   showCorridors,
+  showPOIs,
+  pois,
 }: SimulationMapProps) {
   const mapRef = useRef<L.Map | null>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -75,6 +94,7 @@ export default function SimulationMap({
   const routeLayerRef = useRef<L.LayerGroup | null>(null);
   const stopsLayerRef = useRef<L.LayerGroup | null>(null);
   const flowLayerRef = useRef<L.LayerGroup | null>(null);
+  const poiLayerRef = useRef<L.LayerGroup | null>(null);
 
   const agentMarkersRef = useRef<Map<string, L.CircleMarker>>(new Map());
 
@@ -133,6 +153,7 @@ export default function SimulationMap({
     routeLayerRef.current = L.layerGroup().addTo(map);
     stopsLayerRef.current = L.layerGroup().addTo(map);
     flowLayerRef.current = L.layerGroup().addTo(map);
+    poiLayerRef.current = L.layerGroup().addTo(map);
 
     mapRef.current = map;
 
@@ -142,15 +163,73 @@ export default function SimulationMap({
     };
   }, []);
 
-  // Stops layer
- useEffect(() => {
-  if (!stopsLayerRef.current) return;
-  stopsLayerRef.current.clearLayers();
-  return; // ✅ stop markers never added
-}, [effectiveStops]);
+  // POI layer
+  useEffect(() => {
+    if (!poiLayerRef.current) return;
+    poiLayerRef.current.clearLayers();
+    if (!showPOIs) return;
+    if (!pois || pois.length === 0) return;
 
+    const maxToRender = 450; // keep map responsive
+    const list = pois.slice(0, maxToRender);
 
-  // ✅ Flow layer (new, Skyline-like)
+    for (const p of list) {
+      const c = poiColor(p.type);
+      const marker = L.circleMarker(p.location as any, {
+        radius: 4,
+        weight: 1,
+        opacity: 0.6,
+        fillOpacity: 0.65,
+        color: c,
+        fillColor: c,
+      } as any);
+
+      const debug = (p as any).osmTag ? `<div style="opacity:0.7;font-size:11px">${(p as any).osmTag}</div>` : '';
+      marker.bindTooltip(
+        `<div style="font-size:12px">
+          <div style="font-weight:600">${p.name}</div>
+          <div style="opacity:0.8">type: ${p.type}</div>
+          ${debug}
+        </div>`,
+        { sticky: true }
+      );
+
+      marker.addTo(poiLayerRef.current);
+    }
+  }, [showPOIs, pois]);
+
+  // ✅ Stops layer (NOW ADDED)
+  useEffect(() => {
+    if (!stopsLayerRef.current) return;
+    stopsLayerRef.current.clearLayers();
+    if (!effectiveStops || effectiveStops.length === 0) return;
+
+    const maxStops = 250; // keep map responsive
+    const list = effectiveStops.slice(0, maxStops);
+
+    for (const s of list) {
+      const marker = L.circleMarker(s.location as any, {
+        radius: 3,
+        weight: 1,
+        opacity: 0.7,
+        fillOpacity: 0.65,
+        color: 'hsl(0, 0%, 85%)',
+        fillColor: 'hsl(0, 0%, 85%)',
+      } as any);
+
+      marker.bindTooltip(
+        `<div style="font-size:12px">
+          <div style="font-weight:600">${s.name}</div>
+          <div style="opacity:0.8">id: ${String(s.id)}</div>
+        </div>`,
+        { sticky: true }
+      );
+
+      marker.addTo(stopsLayerRef.current);
+    }
+  }, [effectiveStops]);
+
+  // Flow layer
   useEffect(() => {
     if (!flowLayerRef.current) return;
     flowLayerRef.current.clearLayers();
@@ -159,7 +238,6 @@ export default function SimulationMap({
     const flowEdges = getFlowEdges();
     if (!flowEdges.length) return;
 
-    // Pick top edges for visual clarity
     const sorted = flowEdges.slice().sort((a, b) => b.count - a.count).slice(0, 250);
     const maxCount = sorted[0]?.count ?? 1;
 
@@ -168,7 +246,6 @@ export default function SimulationMap({
       const b = stopById.get(String(e.to));
       if (!a || !b) continue;
 
-      // Thickness scales with flow
       const t = e.count / maxCount;
       const weight = 1 + t * 6;
 
@@ -178,7 +255,7 @@ export default function SimulationMap({
         opacity: 0.12 + t * 0.25,
       }).addTo(flowLayerRef.current);
     }
-  }, [showFlow, stopById, agents]); // agents changes each tick so overlay updates over time
+  }, [showFlow, stopById, agents]);
 
   // Routes layer (generated corridors)
   useEffect(() => {
@@ -189,7 +266,6 @@ export default function SimulationMap({
     const allRoutes = [...effectiveRoutes, ...generatedRoutes];
     if (allRoutes.length === 0) return;
 
-    // Scale generated route thickness based on how many stop-to-stop edges exist in flow
     const flow = getFlowEdges();
     const flowCountByEdge = new Map<string, number>();
     for (const f of flow) flowCountByEdge.set(`${f.from}→${f.to}`, f.count);
@@ -267,4 +343,3 @@ export default function SimulationMap({
 
   return <div ref={mapContainerRef} className="w-full h-full" />;
 }
-

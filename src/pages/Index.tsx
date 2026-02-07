@@ -1,6 +1,6 @@
 // src/pages/Index.tsx
 
-import { useCallback, useEffect } from 'react';
+import { useCallback } from 'react';
 import SimulationMap from '@/components/SimulationMap';
 import ControlPanel from '@/components/ControlPanel';
 import { useSimulation } from '@/hooks/useSimulation';
@@ -15,13 +15,11 @@ export default function Index() {
     setSpeed,
     toggleCorridors,
     toggleFlow,
+    togglePOIs,
     selectAgent,
     clearGeneratedRoutes,
     generateFromFlow,
   } = useSimulation();
-
-  // Auto-load TfWM stops on page load (optional)
-
 
   const handleGenerateRoute = useCallback(() => {
     generateFromFlow();
@@ -31,17 +29,18 @@ export default function Index() {
     <div className="flex h-screen w-screen overflow-hidden">
       <div className="flex-1 relative">
         <SimulationMap
-  agents={state.agents}
-  vehicles={state.vehicles}
-  showFlow={(state as any).showFlow}
-  showCorridors={(state as any).showCorridors}
-  generatedRoutes={state.generatedRoutes}
-  selectedAgentId={state.selectedAgentId}
-  onSelectAgent={selectAgent}
-  baseRoutes={[]}
-  stops={state.networkStops as any}
-/>
-
+          agents={state.agents}
+          vehicles={state.vehicles}
+          showFlow={(state as any).showFlow}
+          showCorridors={(state as any).showCorridors}
+          showPOIs={(state as any).showPOIs}
+          pois={state.pois}
+          generatedRoutes={state.generatedRoutes}
+          selectedAgentId={state.selectedAgentId}
+          onSelectAgent={selectAgent}
+          baseRoutes={[]}
+          stops={state.networkStops as any}
+        />
       </div>
 
       <ControlPanel
@@ -53,6 +52,7 @@ export default function Index() {
         onSetSpeed={setSpeed}
         onToggleFlow={toggleFlow}
         onToggleCorridors={toggleCorridors}
+        onTogglePOIs={togglePOIs}
         onGenerateRoute={handleGenerateRoute}
         onClearRoutes={clearGeneratedRoutes}
       />

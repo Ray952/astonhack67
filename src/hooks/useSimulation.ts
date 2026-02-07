@@ -1,8 +1,8 @@
 // src/hooks/useSimulation.ts
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Agent, SimulationMetrics, BusRoute } from '@/types/simulation';
-import { ASTON_CENSUS, buildCity, randomHomeLocation, BUS_STOPS } from '@/data/astonData';
+import type { Agent, SimulationMetrics, BusRoute, POI, BusStop } from '@/types/simulation';
+import { ASTON_CENSUS, buildCity, randomHomeLocation, BUS_STOPS, POIS as FALLBACK_POIS } from '@/data/astonData';
 import {
   createAgents,
   stepSimulation,
@@ -11,6 +11,8 @@ import {
   clearFlow,
   getFlowEdges,
 } from '@/simulation/engine';
+import { fetchAstonPOIs } from '@/api/osm';
+import { enrichRoutesWithOsrmGeometry } from '@/simulation/osrmGeometry';
 
 const EMPTY_METRICS: SimulationMetrics = {
   totalAgents: 0,
@@ -106,12 +108,18 @@ export function useSimulation() {
     networkStops: BUS_STOPS,
     networkLoaded: false,
 
+    pois: FALLBACK_POIS as POI[],
+    poiLoaded: false,
+
     currentMinute: 0,
     isRunning: false,
     isPaused: false,
     speed: 1,
+
     showFlow: true,
     showCorridors: true,
+    showPOIs: true,
+
     selectedAgentId: null,
 
     metrics: EMPTY_METRICS,
@@ -125,22 +133,30 @@ export function useSimulation() {
     },
   });
 
+  // Keep the latest state for async helpers (like OSRM enrichment)
+  const stateRef = useRef<any>(state);
+  useEffect(() => { stateRef.current = state; }, [state]);
+
   const timerRef = useRef<number | null>(null);
 
-  const start = useCallback(() => {
-    const seed = 1337; // change if you want different city “days”
+  const start = useCallback(async () => {
+    const seed = 1337;
     const agentCount = Math.min(800, ASTON_CENSUS.totalPopulation);
 
+    let realPois: POI[] = [];
+    try {
+      realPois = (await fetchAstonPOIs({ maxPois: 600 })) as any;
+      console.log('[OSM] POIs loaded:', realPois.length);
+    } catch (e) {
+      console.warn('[OSM] POI fetch failed, using fallback POIs:', e);
+      realPois = [];
+    }
+
     const city = buildCity(seed, { poiCount: 500, stopCount: 80 });
-    const pois = city.pois;
+    const pois = (realPois && realPois.length > 20 ? realPois : city.pois) as POI[];
     const stops = city.stops;
 
     console.log('[SIM] city seed', seed, 'POIs', pois.length, 'Stops', stops.length);
-
-    console.log("POIs in use:", pois.length);
-
-    console.log(pois.map(p => p.name));
-
 
     const agents = createAgents(agentCount, pois, () => randomHomeLocation(seed));
 
@@ -150,6 +166,9 @@ export function useSimulation() {
       ...prev,
       networkStops: stops,
       networkLoaded: true,
+
+      pois,
+      poiLoaded: true,
 
       agents,
       vehicles: [],
@@ -234,16 +253,9 @@ export function useSimulation() {
   }, [state.isRunning, state.isPaused, state.speed, state.networkStops]);
 
   const setSpeed = useCallback((speed: number) => setState((prev: any) => ({ ...prev, speed })), []);
-  const toggleCorridors = useCallback(
-  () => setState((prev: any) => ({ ...prev, showCorridors: !prev.showCorridors })),
-  []
-);
-
-  const toggleRoutes = useCallback(() => setState((prev: any) => ({ ...prev, showRoutes: !prev.showRoutes })), []);
-  const toggleFlow = useCallback(
-  () => setState((prev: any) => ({ ...prev, showFlow: !prev.showFlow })),
-  []
-);
+  const toggleCorridors = useCallback(() => setState((prev: any) => ({ ...prev, showCorridors: !prev.showCorridors })), []);
+  const toggleFlow = useCallback(() => setState((prev: any) => ({ ...prev, showFlow: !prev.showFlow })), []);
+  const togglePOIs = useCallback(() => setState((prev: any) => ({ ...prev, showPOIs: !prev.showPOIs })), []);
   const selectAgent = useCallback((id: string | null) => setState((prev: any) => ({ ...prev, selectedAgentId: id })), []);
 
   const clearGeneratedRoutes = useCallback(() => {
@@ -254,30 +266,39 @@ export function useSimulation() {
     }));
   }, []);
 
-  const generateFromFlow = useCallback(() => {
-    setState((prev: any) => {
-      const routes = generateRoutesFromFlow(prev.networkStops, {
-        topEdges: 120,
-        minCount: 8,
-        maxRoutes: 8,
-        maxStopsPerRoute: 18,
-      });
+  // ✅ OSRM-enriched Generate
+  const generateFromFlow = useCallback(async () => {
+    const prev = stateRef.current;
+    const stops: BusStop[] = prev.networkStops;
 
-      const { capturedTraversals, capturedPct } = computeDemandCapturedByRoutes(routes);
-      const routeKm = routes.reduce((s: number, r: BusRoute) => s + (r.geometry ? routeLengthKm(r.geometry as any) : 0), 0);
-      const efficiency = routeKm > 0 ? capturedTraversals / routeKm : 0;
-
-      const proposal: ProposalSnapshot = {
-        minute: prev.currentMinute,
-        routesCount: routes.length,
-        routeKm: Math.round(routeKm * 100) / 100,
-        demandCapturedPct: Math.round(capturedPct * 10) / 10,
-        demandCapturedTraversals: capturedTraversals,
-        efficiency: Math.round(efficiency * 10) / 10,
-      };
-
-      return { ...prev, generatedRoutes: routes, analysis: { ...prev.analysis, proposal } };
+    const routes = generateRoutesFromFlow(stops, {
+      topEdges: 120,
+      minCount: 8,
+      maxRoutes: 8,
+      maxStopsPerRoute: 18,
     });
+
+    // Enrich with OSRM road-following geometry
+    const enriched = await enrichRoutesWithOsrmGeometry(routes, stops, 'driving');
+
+
+    const { capturedTraversals, capturedPct } = computeDemandCapturedByRoutes(enriched);
+    const routeKm = enriched.reduce(
+      (s: number, r: BusRoute) => s + (r.geometry ? routeLengthKm(r.geometry as any) : 0),
+      0
+    );
+    const efficiency = routeKm > 0 ? capturedTraversals / routeKm : 0;
+
+    const proposal: ProposalSnapshot = {
+      minute: prev.currentMinute,
+      routesCount: enriched.length,
+      routeKm: Math.round(routeKm * 100) / 100,
+      demandCapturedPct: Math.round(capturedPct * 10) / 10,
+      demandCapturedTraversals: capturedTraversals,
+      efficiency: Math.round(efficiency * 10) / 10,
+    };
+
+    setState((s: any) => ({ ...s, generatedRoutes: enriched, analysis: { ...s.analysis, proposal } }));
   }, []);
 
   return {
@@ -292,5 +313,6 @@ export function useSimulation() {
     generateFromFlow,
     toggleFlow,
     toggleCorridors,
+    togglePOIs,
   };
 }

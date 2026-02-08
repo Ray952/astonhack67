@@ -108,9 +108,10 @@ export function haversineDistance(a: [number, number], b: [number, number]): num
 // --------------------
 
 export const CARBON_FACTORS = {
-  car_per_km: 171,         // g CO2 / km
-  bus_base_per_km: 822,    // g CO2 / km (planning proxy)
+  car_per_km: 171,          // g CO2 / km (per car trip)
+  bus_per_passenger_km: 70, // g CO2 / km (per passenger on bus; rough proxy)
 };
+
 
 // --------------------
 // Category weights (for synthetic generation)

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Agent, SimulationMetrics, BusRoute, POI, BusStop } from '@/types/simulation';
-import { ASTON_CENSUS, buildCity, randomHomeLocation, BUS_STOPS, POIS as FALLBACK_POIS } from '@/data/astonData';
+import { ASTON_CENSUS, buildCity, randomHomeLocation, BUS_STOPS,BUS_ROUTES, POIS as FALLBACK_POIS } from '@/data/astonData';
 import {
   createAgents,
   stepSimulation,
@@ -104,6 +104,10 @@ export function useSimulation() {
     agents: [],
     vehicles: [],
     generatedRoutes: [],
+    scenario: 'baseline', // 'baseline' | 'proposal'
+initialAgents: null,
+baseRoutes: BUS_ROUTES,
+
 
     networkStops: BUS_STOPS,
     networkLoaded: false,
@@ -159,6 +163,8 @@ export function useSimulation() {
     console.log('[SIM] city seed', seed, 'POIs', pois.length, 'Stops', stops.length);
 
     const agents = createAgents(agentCount, pois, () => randomHomeLocation(seed));
+    const initialAgents = JSON.parse(JSON.stringify(agents));
+
 
     clearFlow();
 
@@ -166,6 +172,7 @@ export function useSimulation() {
       ...prev,
       networkStops: stops,
       networkLoaded: true,
+      
 
       pois,
       poiLoaded: true,
@@ -178,6 +185,9 @@ export function useSimulation() {
       isPaused: false,
       metrics: EMPTY_METRICS,
       analysis: { baseline: null, proposal: null },
+      initialAgents,
+      scenario: 'baseline',
+      
     }));
   }, []);
 
@@ -226,7 +236,30 @@ export function useSimulation() {
           return { ...prev, isPaused: true };
         }
 
-        const result = stepSimulation(prev.agents, [], prev.currentMinute, [], prev.networkStops);
+// decide which world we are simulating
+// baseline = demand (no buses, generate flows)
+// proposal = assignment (buses + waiting)
+
+// baseline = demand only (walk-only) — no routes
+const simMode = prev.scenario === 'proposal' ? 'assignment' : 'demand';
+
+// proposal = allow both baseline routes + generated corridors
+const activeRoutes =
+  simMode === 'assignment'
+    ? [...(prev.baseRoutes ?? []), ...(prev.generatedRoutes ?? [])]
+    : [];
+
+
+
+const result = stepSimulation(
+  prev.agents,
+  [],
+  prev.currentMinute,
+  activeRoutes,
+  prev.networkStops,
+  simMode
+);
+
 
         const agents: Agent[] = result.agents.map((a: Agent) => ({
           ...a,
@@ -298,7 +331,31 @@ export function useSimulation() {
       efficiency: Math.round(efficiency * 10) / 10,
     };
 
-    setState((s: any) => ({ ...s, generatedRoutes: enriched, analysis: { ...s.analysis, proposal } }));
+setState((s: any) => {
+  // reset agents back to their original initial state
+  const resetAgents = s.initialAgents
+    ? JSON.parse(JSON.stringify(s.initialAgents))
+    : s.agents;
+
+  // optional but recommended: keep baseline flows separate from proposal run
+  clearFlow();
+
+  return {
+    ...s,
+    generatedRoutes: enriched,
+    analysis: { ...s.analysis, proposal },
+
+    agents: resetAgents,
+    currentMinute: s.simStartMinute,
+
+    isRunning: true,
+    isPaused: false,
+
+    scenario: 'proposal',
+    metrics: EMPTY_METRICS,
+    selectedAgentId: null,
+  };
+});
   }, []);
 
   return {

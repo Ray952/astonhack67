@@ -1,5 +1,6 @@
 // src/simulation/engine.ts
 // Offline-first: life-like schedules + dwell + flow recording
+import { routeLengthKm } from '@/hooks/useSimulation';
 
 import {
   ASTON_BBOX,
@@ -836,12 +837,15 @@ const routeById = new Map<string, BusRoute>((_routes || []).map(r => [r.id, r]))
 
       agent.targetLocation = clampToAstonBBox(next.destination);
 
-      // ✅ Phase 3A: car counterfactual baseline (kg CO2) added once per trip
-const CAR_TRIP_THRESHOLD_KM = 1.2; // tweak: 1.0–2.0 km
+      // --- Car baseline (counterfactual) ---
+// Hackathon baseline: "Without transit, this trip would be by car"
 const tripKm = haversineDistance(agent.currentLocation, agent.targetLocation);
-if (Number.isFinite(tripKm) && tripKm >= CAR_TRIP_THRESHOLD_KM) {
-  agent.carBaselineCO2 += (CARBON_FACTORS.car_per_km * tripKm) / 1000; // g->kg
+if (Number.isFinite(tripKm) && tripKm > 0) {
+  agent.carBaselineCO2 =
+    (agent.carBaselineCO2 ?? 0) + (CARBON_FACTORS.car_per_km * tripKm) / 1000; // kg
 }
+
+
 
             // --- Phase 1: compute assignment plan based on active routes ---
       const activeRoutes = _routes || [];
@@ -974,6 +978,15 @@ continue;
         if (agent.targetLocation) agent.currentLocation = clampToAstonBBox(agent.targetLocation);
 
         agent.distanceTraveled += plan.walkKm;
+
+        // Phase 3C: if walk-only is actually a "car trip" in the counterfactual, count it as car emissions in proposal
+const CAR_TRIP_THRESHOLD_KM = 1.2;
+if (plan.walkKm >= CAR_TRIP_THRESHOLD_KM) {
+  agent.carbonEmitted += (CARBON_FACTORS.car_per_km * plan.walkKm) / 1000;
+}
+
+
+
 
         const trip = daily[idx];
         a._dwellLeft = trip?.dwell ?? randInt(30, 120);
@@ -1219,7 +1232,31 @@ if (mode === 'demand' && a._mode === 'transit' && a._path) {
 
   }
 
-    
+  // --- Service-based bus emissions (kg) ---
+// Add CO2 based on how much bus service is operated this minute.
+// Very defensible for hackathon: emissions scale with service, not ridership.
+if (mode === 'assignment' && _routes && _routes.length) {
+  // km of service operated per minute across all routes
+  // assume each route runs once per headway; approximate frequency = 60/headway
+  let serviceKmThisMinute = 0;
+
+  for (const r of _routes) {
+    const headway = Math.max(5, routeHeadwayMin(r)); // safety
+    const freqPerHour = 60 / headway;
+    const freqPerMinute = freqPerHour / 60;
+
+    const km = r.geometry ? routeLengthKm(r.geometry as any) : 0;
+    serviceKmThisMinute += km * freqPerMinute;
+  }
+
+  const busCO2kgThisMinute = (CARBON_FACTORS.bus_per_passenger_km * serviceKmThisMinute) / 1000;
+  const perAgent = busCO2kgThisMinute / Math.max(1, agents.length);
+
+  for (const a of agents) {
+    a.carbonEmitted += perAgent;
+  }
+}
+
 
 
   return { agents, vehicles: [] };
@@ -1233,12 +1270,34 @@ if (mode === 'demand' && a._mode === 'transit' && a._path) {
 export function calculateMetrics(agents: Agent[]): SimulationMetrics {
   
   const totalCO2 = agents.reduce((s, a) => s + a.carbonEmitted, 0);
-  const totalCarBaselineCO2 = agents.reduce((s, a) => s + (a.carBaselineCO2 ?? 0), 0);
-const co2Saved = Math.max(0, totalCarBaselineCO2 - totalCO2);
-if ((globalThis as any).__co2Once !== true) {
-  (globalThis as any).__co2Once = true;
-  console.log('[CO2]', { totalCO2, totalCarBaselineCO2 });
+
+// baseline: if everyone drove the distance they travelled
+const totalDistKm = agents.reduce((s, a) => s + (a.distanceTraveled ?? 0), 0);
+const totalCarBaselineCO2 =
+  (CARBON_FACTORS.car_per_km * totalDistKm) / 1000; // kg
+
+// remaining cars: only agents who *didn't* get a bus plan
+const remainingCarDistKm = agents.reduce((s, a) => {
+  const mode = (a as any)._lastPlanMode;
+  return s + (mode === 'walk' ? (a.distanceTraveled ?? 0) : 0);
+}, 0);
+
+const remainingCarCO2 =
+  (CARBON_FACTORS.car_per_km * remainingCarDistKm) / 1000; // kg
+
+// scenario = bus service emissions (already in carbonEmitted) + remaining cars
+const scenarioCO2 = totalCO2 + remainingCarCO2;
+
+const co2Saved = Math.max(0, totalCarBaselineCO2 - scenarioCO2);
+
+if (agents.length && agents.every(a => a.state === 'at_destination')) {
+  console.log('[CO2 FINAL]', {
+    totalCO2,
+    totalCarBaselineCO2,
+    co2Saved: Math.max(0, totalCarBaselineCO2 - totalCO2),
+  });
 }
+
 
   const totalDist = agents.reduce((s, a) => s + a.distanceTraveled, 0);
 
@@ -1257,9 +1316,10 @@ if ((globalThis as any).__co2Once !== true) {
     averageTravelTime: agents.length ? agents.reduce((s, a) => s + a.totalTimeSpent, 0) / agents.length : 0,
     averageWaitTime: agents.length ? agents.reduce((s, a) => s + a.waitingTime, 0) / agents.length : 0,
 
-    totalCO2: Math.round(totalCO2 * 100) / 100,
-    co2PerCapita: agents.length ? Math.round((totalCO2 / agents.length) * 1000) / 1000 : 0,
-    co2Saved: Math.round(co2Saved * 100) / 100,
+    totalCO2: Math.round(scenarioCO2 * 100) / 100,
+co2PerCapita: agents.length ? Math.round((scenarioCO2 / agents.length) * 1000) / 1000 : 0,
+co2Saved: Math.round(co2Saved * 100) / 100,
+
 
     totalDistance: Math.round(totalDist * 100) / 100,
     averageAge: agents.length ? agents.reduce((s, a) => s + a.age, 0) / agents.length : 0,

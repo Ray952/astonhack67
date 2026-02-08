@@ -63,7 +63,7 @@ function computeFlowSummary() {
   return { edgesCount: edges.length, totalTraversals, peakHour };
 }
 
-function routeLengthKm(geometry: [number, number][]) {
+export function routeLengthKm(geometry: [number, number][]) {
   let sum = 0;
   for (let i = 0; i < geometry.length - 1; i++) {
     const [lat1, lon1] = geometry[i];
